@@ -6,6 +6,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <sys/socket.h>   // 直播列表自检用 recv(MSG_PEEK|MSG_DONTWAIT)
 #include <cstring>
 
 // v2 断点续传：.meta 元数据（二进制，便于原子写与续传时读回）
@@ -141,6 +142,25 @@ void CLogic::close()
 
 void CLogic::OnClientDisconnect(sock_fd clientfd)
 {
+    // ※ 断线时若在直播中（崩溃/关程序/断网没点停止），
+    //   把 status 置 0，否则列表会一直显示打不开的"僵尸标题"
+    {
+        auto lit = m_mapLiveFdToUser.find(clientfd);
+        if (lit != m_mapLiveFdToUser.end()) {
+            int uid = lit->second;
+            char sqlBuf[_DEF_SQLIEN] = "";
+            sprintf(sqlBuf,
+                "UPDATE t_LiveStream SET status = 0 WHERE userId = %d AND status = 1;", uid);
+            bool ok = m_sql->UpdataMysql(sqlBuf);
+            cout << "[OnClientDisconnect] live-cleanup fd=" << clientfd
+                 << " uid=" << uid << " sqlOk=" << ok << endl;
+            m_mapLiveFdToUser.erase(lit);
+        } else {
+            cout << "[OnClientDisconnect] fd=" << clientfd
+                 << " NOT in live map (size=" << m_mapLiveFdToUser.size() << ")" << endl;
+        }
+    }
+
     // 客户端异常断开（不发 END 直接关 socket）：清掉该连接关联的 v2 task + busy 锁，
     // 但【保留】.part/.meta 文件，供客户端断点续传。
     std::lock_guard<std::mutex> lk(m_v2Mutex);
@@ -1064,6 +1084,7 @@ void CLogic::LiveStartRq(sock_fd clientfd, char* szbuf, int nlen)
     // 5. 返回成功和 streamKey
     rs.m_nResult = 1;
     strcpy(rs.m_szStreamKey, streamKey);
+    m_mapLiveFdToUser[clientfd] = rq->m_nUserId; // 记下该连接正在直播
     m_tcp->SendData(clientfd, (char*)&rs, sizeof(rs));
 }
 
@@ -1080,12 +1101,35 @@ void CLogic::LiveStopRq(sock_fd clientfd, char* szbuf, int nlen)
         rq->m_nUserId);
 
     rs.m_nResult = m_sql->UpdataMysql(sqlBuf) ? 1 : 0;
+    if (rs.m_nResult == 1) m_mapLiveFdToUser.erase(clientfd); // 正常停播，摘标记
     m_tcp->SendData(clientfd, (char*)&rs, sizeof(rs));
 }
 
 // ===== 获取直播列表 =====
 void CLogic::LiveListRq(sock_fd clientfd, char* szbuf, int nlen)
 {
+    // ※ 双保险：列直播前，主动探测每个"声称在直播"的 fd 是否还连着。
+    //   万一 OnClientDisconnect 因断网/FIN 延迟没触发，这里也能把僵尸清掉，
+    //   避免列表出现打不开的"僵尸标题"。recv(MSG_PEEK|MSG_DONTWAIT) 不消费数据、
+    //   不阻塞：对端已断时返回 <0 且 errno 非 EAGAIN（如 EBADF/ECONNRESET），即视为死连接。
+    for (auto it = m_mapLiveFdToUser.begin(); it != m_mapLiveFdToUser.end(); ) {
+        int fd  = it->first;
+        int uid = it->second;
+        char probe[1];
+        ssize_t pr = recv(fd, probe, sizeof(probe), MSG_PEEK | MSG_DONTWAIT);
+        if (pr < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            char sqlBuf2[_DEF_SQLIEN] = "";
+            sprintf(sqlBuf2,
+                "UPDATE t_LiveStream SET status = 0 WHERE userId = %d AND status = 1;", uid);
+            m_sql->UpdataMysql(sqlBuf2);
+            cout << "[LiveListRq] self-heal fd=" << fd << " uid=" << uid
+                 << " cleared zombie(status=0)" << endl;
+            it = m_mapLiveFdToUser.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
     // 查询所有正在直播的条目，关联用户名
     char sqlBuf[_DEF_SQLIEN] = "";
     sprintf(sqlBuf,

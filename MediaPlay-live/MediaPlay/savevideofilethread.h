@@ -33,6 +33,8 @@ struct STRU_AV_FORMAT //存储视频编码的基础配置
     bool hasDesk;
     bool hasAudio;
 
+    bool isLive = false;   // ※ 新增：true=直播推流(低延迟/无B帧)，false=点播录制(有B帧)
+
     //视频信息
     int width;
     int height;

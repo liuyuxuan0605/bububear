@@ -18,6 +18,7 @@ class PicInPic_Read: public QThread //采集摄像头画面 + 桌面画面，完
     Q_OBJECT
 public:
     explicit PicInPic_Read(QObject *parent = 0);
+    void setTargetSize(int w, int h);   // 设置屏幕录制编码器目标尺寸（逻辑像素）
 signals:
     void SIG_sendVideoFrame( QImage img ); // 用于预览
     void SIG_sendVideoFrameData(uint8_t* picture_buf, int buffer_size ); //采集的数据格式 YUV420P
@@ -37,5 +38,10 @@ private:
 
     bool isStop;
     QImage m_deskImg;
+
+    // ※ 屏幕录制：编码器目标尺寸（来自 STRU_AV_FORMAT.width/height，逻辑像素）。
+    //   抓屏得到的是物理像素，需在编码前缩放对齐，否则 memcpy 越界崩溃。
+    int m_targetW = 0;
+    int m_targetH = 0;
 };
 #endif // PICINPIC_READ_H

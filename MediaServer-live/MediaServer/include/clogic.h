@@ -64,6 +64,7 @@ private:
     Block_Epoll_Net * m_tcp;
 
     map<int,int>m_mapIDToUserFD;
+    std::map<sock_fd,int> m_mapLiveFdToUser; // 直播中 fd→userId，供断线自动清 status
     map<int,FileInfo*>m_mapFileIDToFileInfo;
     // 推荐"换一批"：记住每个用户上一次刷新推送的 videoId 集合，
     // 本次刷新优先推不在上一批里的视频，10 条全不喜欢时点刷新就能整批换掉

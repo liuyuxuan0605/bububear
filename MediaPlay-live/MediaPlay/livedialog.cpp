@@ -199,14 +199,15 @@ void LiveDialog::startLivePush(QString rtmpUrl)
     format.hasCamera  = true;
     format.hasDesk    = false;         // 直播一般只推摄像头，不录屏
     format.videoBitRate = 800000;
+    format.isLive = true;   // ※ 标记这是直播推流
 
     QScreen *src = QApplication::primaryScreen();
     QRect rect = src->geometry();
     format.width  = rect.width();
     format.height = rect.height();
 
-    // 显示预览窗口（主播需要看到自己在播什么）
-    this->showMinimized();
+    // 显示预览窗口（主播需要看到自己在播什么）。
+    // 按需求：开始直播后不再最小化对话框，保持直播页面可见（方便随时查看状态/停止）。
     m_previewWidget->show();
 
     // 启动编码推流（和 RecorderDialog 里调用顺序完全一致）

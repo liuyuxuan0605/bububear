@@ -26,7 +26,7 @@ RecorderDialog::~RecorderDialog()
 void RecorderDialog::on_pb_start_clicked()
 {
 
-     this->showMinimized();
+     // 按需求：开始录制后不再最小化对话框，保持录制页面可见（方便随时看预览/点停止）
      m_picturewidget->show();
 
      STRU_AV_FORMAT format;
@@ -36,6 +36,8 @@ void RecorderDialog::on_pb_start_clicked()
      format.hasCamera = true;
      format.hasDesk = true;
      format.videoBitRate = 800000;
+     format.isLive = false;  // ※ 点播录制（可省略，默认即 false，写上更清晰）
+
 
      //采样频率 44100
      //码率 64000

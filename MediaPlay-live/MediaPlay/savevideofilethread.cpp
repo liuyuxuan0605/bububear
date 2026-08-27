@@ -1,4 +1,6 @@
 ﻿#include "savevideofilethread.h"
+#include <QMessageBox>
+#include <libavutil/error.h>
 //音视频编码 + 文件写入 + 同步
 SaveVideoFileThread::SaveVideoFileThread()
 {
@@ -292,16 +294,18 @@ void SaveVideoFileThread::add_video_stream(OutputStream *ost, AVFormatContext *o
 
     c->gop_size      = 12; /* emit one intra frame every twelve frames at most */
     c->pix_fmt       = STREAM_PIX_FMT;
-    if (c->codec_id == AV_CODEC_ID_MPEG2VIDEO) {
-        /* just for testing, we also add B-frames */
-        c->max_b_frames = 2;
-    }
     if (c->codec_id == AV_CODEC_ID_MPEG1VIDEO) {
         /* Needed to avoid using macroblocks in which some coeffs overflow.
              * This does not happen with normal video, it just happens here as
              * the motion of the chroma plane does not match the luma plane. */
         c->mb_decision = 2;
     }
+
+    // ※ 录制崩溃修复（用户最终要求）：B 帧在本工程自定义写帧逻辑下会崩溃，
+    //   统一关闭 B 帧（直播/录制/任意封装都关），不再按 isLive 区分。
+    //   如需 B 帧画质收益，必须补齐：①末尾 avcodec_send_frame(NULL) flush 尾部帧；
+    //   ②B 帧 dts/pts 重排，确保写入流 dts 严格单调。当前以"不崩溃"为第一目标。
+    c->max_b_frames = 0;
 
     /* Some formats want stream headers to be separate. */
     if (oc->oformat->flags & AVFMT_GLOBALHEADER)
@@ -370,7 +374,14 @@ void SaveVideoFileThread::open_video(AVFormatContext *oc, AVCodec *codec, Output
     AVDictionary *opt = NULL;
 
     av_dict_set(&opt,"preset","superfast",0);
-    av_dict_set(&opt,"tune","zerolatency",0);
+
+    //av_dict_set(&opt,"tune","zerolatency",0);
+    // 修改为：
+    if (m_avFormat.isLive) {
+        av_dict_set(&opt, "tune", "zerolatency", 0);  // 直播：零延迟
+    } else {
+        av_dict_set(&opt, "tune", "film", 0);         // 点播：电影模式
+    }
 
     c->thread_count=4;
 
@@ -410,6 +421,9 @@ void SaveVideoFileThread::open_video(AVFormatContext *oc, AVCodec *codec, Output
 void SaveVideoFileThread::slot_setInfo(STRU_AV_FORMAT &avFormat)
 {
     m_avFormat=avFormat;
+    // ※ 屏幕录制修复：把编码器目标尺寸（逻辑像素）传给抓屏模块，
+    //   让抓屏图在编码前缩放对齐，避免与 frameBuffer 尺寸不匹配导致 memcpy 越界崩溃。
+    m_picInPicRead->setTargetSize(m_avFormat.width, m_avFormat.height);
 
     char filename[260]="";
     std::string path=m_avFormat.fileName.toStdString();
@@ -452,7 +466,11 @@ void SaveVideoFileThread::slot_setInfo(STRU_AV_FORMAT &avFormat)
     if (!(fmt->flags & AVFMT_NOFILE)) {
         ret = avio_open(&oc->pb, filename, AVIO_FLAG_WRITE);
         if (ret < 0) {
-            fprintf(stderr, "Could not open '%s'\n", filename);
+            char errbuf[128] = {0};
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            QMessageBox::critical(NULL, tr("录制失败"),
+                tr("无法打开输出文件：\n%1\n错误：%2")
+                .arg(QString::fromUtf8(filename)).arg(QString::fromUtf8(errbuf)));
             return;
         }
     }
@@ -460,7 +478,10 @@ void SaveVideoFileThread::slot_setInfo(STRU_AV_FORMAT &avFormat)
     /* Write the stream header, if any. */
     ret = avformat_write_header(oc, NULL);
     if (ret < 0) {
-        fprintf(stderr, "Error occurred when opening output file\n");
+        char errbuf[128] = {0};
+        av_strerror(ret, errbuf, sizeof(errbuf));
+        QMessageBox::critical(NULL, tr("录制失败"),
+            tr("写入文件头失败：\n%1").arg(QString::fromUtf8(errbuf)));
         return;
     }
 
@@ -482,7 +503,10 @@ void SaveVideoFileThread::close_stream(AVFormatContext *oc, OutputStream *ost)
 {
     if (!ost) return;
     avcodec_free_context(&ost->enc);
-    av_frame_free(&ost->frame);
+    // ※ ost->frame 的 data[1]/data[2] 经 avpicture_fill 指向 frameBuffer(out_buffer_yuv) 内部偏移，
+    //   不能用 av_frame_free（会中段释放 + 与下方 av_free(frameBuffer) 重复释放）。
+    //   真实存储由 av_free(ost->frameBuffer) 释放一次，这里仅用 av_free 释放帧结构体。
+    av_free(ost->frame);
     //回收
     av_free(ost->frameBuffer);
     av_frame_free(&ost->tmp_frame);
